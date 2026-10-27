@@ -37,6 +37,10 @@ POST_INTERVAL = int(os.environ.get("POST_INTERVAL", "30"))
 USER_AGENT = "jstage-x-bot/1.0 (+https://github.com/)"
 
 DOI_RE = re.compile(r"10\.\d{4,9}/[^\s<>\"'\]]+")
+# 例: 10.60233/jjsci.61.11_606 → 61巻11号 606ページ
+VOLISS_RE = re.compile(r"\.(\d+)\.(\d+)_(\d+)$")
+# 投稿しない記事（タイトルがこれらと一致したらスキップ）
+SKIP_TITLES = {"編集後記", "目次", "表紙", "奥付", "裏表紙"}
 
 
 # ---------- 記録ファイル ----------
@@ -64,23 +68,45 @@ def fetch_entries() -> list[dict]:
     for e in feed.entries:
         link = e.get("link", "").strip()
         summary = e.get("summary", "")
-        m = DOI_RE.search(summary) or DOI_RE.search(link)
+        fields = parse_summary(summary)
+        m = DOI_RE.search(fields.get("DOI", "")) or DOI_RE.search(summary)
         doi = m.group(0).rstrip(".,;)") if m else None
-        authors = [a.get("name", "").strip() for a in e.get("authors", []) if a.get("name")]
-        if not authors and e.get("author"):
-            authors = [s.strip() for s in re.split(r"[,、，]", e["author"]) if s.strip()]
+
+        # J-STAGE のRSSは <title> が「新着記事を登載しました。」固定なので summary から取る
+        title = fields.get("タイトル") or clean(e.get("title", ""))
+        authors_raw = fields.get("著者", "")
+        authors = [s.strip() for s in re.split(r"[,、，;；]", authors_raw) if s.strip()]
+
+        vol = iss = page = None
+        if doi and (vm := VOLISS_RE.search(doi)):
+            vol, iss, page = int(vm.group(1)), int(vm.group(2)), int(vm.group(3))
+
         articles.append(
             {
                 "key": doi or e.get("id") or link,  # 重複判定に使うID
-                "title": clean(e.get("title", "")),
+                "title": title,
                 "authors": authors,
                 "url": f"https://doi.org/{doi}" if doi else link,
-                "published": e.get("published", e.get("updated", "")),
+                "published": fields.get("公開日") or e.get("published", e.get("updated", "")),
+                "vol": vol,
+                "iss": iss,
+                "page": page or 0,
+                "skip": title in SKIP_TITLES,
             }
         )
-    # 古い順に投稿したいので公開日でソート
-    articles.sort(key=lambda a: a["published"])
+    # 公開日 → ページ順（＝目次の順）に並べる
+    articles.sort(key=lambda a: (a["published"], a["vol"] or 0, a["iss"] or 0, a["page"]))
     return articles
+
+
+def parse_summary(summary: str) -> dict:
+    """'[ タイトル ] xxx<br/>[ 著者 ] yyy ...' を {'タイトル': 'xxx', '著者': 'yyy'} にする。"""
+    text = re.sub(r"<br\s*/?>", "\n", summary, flags=re.I)
+    text = re.sub(r"<[^>]+>", "", text)
+    fields = {}
+    for m in re.finditer(r"\[\s*([^\]]+?)\s*\]\s*(.*?)(?=\s*\[\s*[^\]]+?\s*\]|\Z)", text, re.S):
+        fields[m.group(1)] = re.sub(r"\s+", " ", m.group(2)).strip()
+    return fields
 
 
 def clean(text: str) -> str:
@@ -110,7 +136,10 @@ def weighted_len(text: str) -> int:
 
 
 def build_text(a: dict, limit: int = 280) -> str:
-    head = f"【{JOURNAL_NAME}】新着論文"
+    head = f"【{JOURNAL_NAME}】"
+    if a.get("vol") and a.get("iss"):
+        head += f"{a['vol']}巻{a['iss']}号"
+    head += " 新着論文"
     if a["authors"]:
         author = a["authors"][0] + (" ほか" if len(a["authors"]) > 1 else "")
     else:
@@ -177,6 +206,15 @@ def main() -> int:
     if not posted and new and not args.dry_run:
         print("posted.json が空です。過去記事を一斉投稿しないよう、先に --init を実行してください。")
         return 1
+
+    # 編集後記などは投稿せず、投稿済み扱いにする
+    for a in [a for a in new if a["skip"]]:
+        print(f"スキップ: {a['title']}")
+        if not args.dry_run:
+            posted[a["key"]] = {"title": a["title"], "at": now, "skipped": True}
+    new = [a for a in new if not a["skip"]]
+    if not args.dry_run:
+        save_state(state)
 
     targets = new[:MAX_POSTS]
     client = None if args.dry_run else make_client()
