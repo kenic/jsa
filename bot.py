@@ -32,7 +32,7 @@ FEED_URL = os.environ.get(
 )
 JOURNAL_NAME = "日本の科学者"
 STATE_FILE = Path(__file__).with_name("posted.json")
-MAX_POSTS = int(os.environ.get("MAX_POSTS", "5"))
+MAX_POSTS = int(os.environ.get("MAX_POSTS", "1"))
 POST_INTERVAL = int(os.environ.get("POST_INTERVAL", "30"))
 USER_AGENT = "jstage-x-bot/1.0 (+https://github.com/)"
 
