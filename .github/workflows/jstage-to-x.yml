@@ -2,7 +2,7 @@ name: jstage-to-x
 
 on:
   schedule:
-    - cron: "45 0 * * *"   # 毎日 9:07 JST（UTC 0:07）
+    - cron: "53 1 * * *"   #（UTC）
   workflow_dispatch:
     inputs:
       mode:
